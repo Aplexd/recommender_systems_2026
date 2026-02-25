@@ -25,7 +25,15 @@ def load_articles() -> pl.DataFrame:
     return _load_parquet("ARTICLES")
 
 def load_embeddings() -> pl.DataFrame:
-    return _load_parquet("EMBEDDINGS")
+    dataframe = _load_parquet("EMBEDDINGS")
+
+    # Rename columns to make switching between embeddings easier
+    dataframe.columns = [dataframe.columns[0], "embedding"]
+    
+
+    return (dataframe
+            # Add column with norm
+            .with_columns(embedding_norm=pl.col("embedding").list.eval(pl.element().pow(2)).list.sum().sqrt()))
 
 def load_behaviors() -> pl.DataFrame:
     return _load_parquet("BEHAVIORS")
