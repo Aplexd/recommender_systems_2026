@@ -13,14 +13,94 @@ TODO: Take into account both the history and training dataset
 
 
 def extract_features(test: pl.DataFrame):
-
     pass
 
 
-def predict():
+def predict(similarities: pl.DataFrame, 
+            behaviors: pl.DataFrame) -> pl.DataFrame:
+    labeled = (binary_labels(behaviors=behaviors)
+               .select("impression_id", "user_id", pl.col("article_ids_inview").alias("article_id"), "clicked_labels"))
+    
+    prediction = (labeled
+     .explode("article_id", "clicked_labels")
+     .join(similarities, on=("user_id", "article_id"), how="left")
+     .group_by("impression_id", maintain_order=True)
+     .agg("clicked_labels", pl.col("similarity").alias("predicted_score")))
+    
+    return prediction
 
-    pass
 
+def binary_labels(behaviors: pl.DataFrame) -> pl.DataFrame:
+    """
+    Based on create_binary_labels_column from 
+    https://github.com/ebanalyse/ebnerd-benchmark/blob/main/src/ebrec/utils/_behaviors.py
+    """
+
+    behaviors = behaviors.with_row_index()
+
+    labels = (
+        behaviors.explode("article_ids_inview")
+        .with_columns(pl.col("article_ids_inview")
+                      .is_in(pl.col("article_ids_clicked"))
+                      .cast(pl.Int8)
+                      .alias("clicked_labels"))
+        .group_by("index")
+        .agg("clicked_labels")
+    )
+
+    return (behaviors
+            .join(labels, on="index", how="left")
+            .drop("index"))
+
+
+def calculate_user_article_similarity(behaviors: pl.DataFrame, 
+            user_features: pl.DataFrame,
+            article_embeddings: pl.DataFrame):
+    """
+    Calculates user-article similarity for every article each user has seen
+    
+    Result tuples: (impression_id, user_id, article_id, similarity)
+    """
+
+    articles_seen_by_user = (
+        behaviors
+        .select("user_id", pl.col("article_ids_inview").alias("article_id"))
+        # .with_columns(article_inview_index=pl.int_ranges(0, pl.col("article_id").list.len()))
+        .explode("article_id")
+        # .with_columns(articles_clicked=pl.col("article_ids_clicked").list.contains(pl.col("article_id")))
+
+        # # User might have been shown the same article multiple times.
+        .unique()
+    )
+
+    user_article_similarities = (
+        articles_seen_by_user
+
+        # Join with user features
+        .join(user_features
+                .select("user_id",
+                        pl.col("embedding").alias("user_embedding"),
+                        pl.col("embedding_norm").alias("user_norm")),
+                on="user_id")
+        
+        # Join with article features
+        .join(article_embeddings
+                .select("article_id",
+                        pl.col("embedding").alias("article_embedding"),
+                        pl.col("embedding_norm").alias("article_norm")),
+                on="article_id")
+
+        # Calulate cosine similarity
+        .explode("article_embedding", "user_embedding")
+        .group_by("user_id", "article_id")
+        .agg(
+            # similarity=cosine_similarity(pl.col("article_embedding"), pl.col("user_embedding"))
+            similarity=(pl.col("article_embedding") * pl.col("user_embedding")).sum() / (pl.col("user_norm") * pl.col("article_norm")).first()
+            )
+                
+    )
+
+    return user_article_similarities
 
 def function(articles: pl.DataFrame,
              embeddings: pl.DataFrame):
@@ -71,7 +151,6 @@ def aggregate_user_features(article_features: pl.DataFrame,
         .with_columns(embedding_norm=pl.col("embedding").list.eval(pl.element().pow(2)).list.sum().sqrt())
     )
 
-
 # def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 #     dot_product = np.dot(a, b)
 
@@ -105,45 +184,12 @@ if __name__ == "__main__":
 
     print(f"Behaviors:\n", behaviors)
 
-    # Test prediction
-    for i in range(10):
-        user_id = user_features.item(i, 0)
+    user_article_similarity = calculate_user_article_similarity(behaviors=behaviors, 
+                                                                user_features=user_features, 
+                                                                article_embeddings=article_embeddings)
+    print(user_article_similarity)
 
-        articles_seen_by_user = (
-            behaviors
-            .select("user_id", pl.col("article_ids_inview").alias("article_id"))
-            .filter(pl.col("user_id") == user_id)
-            .explode("article_id")
-            # User might have been shown the same article multiple times.
-            .unique()
+    prediction = predict(user_article_similarity, behaviors=behaviors)
+    print(prediction)
 
-        )
-
-        user_article_similarities = (
-            articles_seen_by_user
-
-            # Join with user features
-            .join(user_features
-                  .select("user_id",
-                          pl.col("embedding").alias("user_embedding"),
-                          pl.col("embedding_norm").alias("user_norm")),
-                  on="user_id")
-            
-            # Join with article features
-            .join(article_embeddings
-                  .select("article_id",
-                          pl.col("embedding").alias("article_embedding"),
-                          pl.col("embedding_norm").alias("article_norm")),
-                  on="article_id")
-
-            # Calulate cosine similarity
-            .explode("article_embedding", "user_embedding")
-            .group_by("user_id", "article_id")
-            .agg(
-                # similarity=cosine_similarity(pl.col("article_embedding"), pl.col("user_embedding"))
-                similarity=(pl.col("article_embedding") * pl.col("user_embedding")).sum() / (pl.col("user_norm") * pl.col("article_norm")).first()
-                )
-                    
-        )
-
-        print(user_article_similarities)
+    prediction.write_parquet("predictions/content_based.parquet")
