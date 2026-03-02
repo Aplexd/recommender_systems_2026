@@ -1,7 +1,5 @@
-from utils import load_behaviors, load_embeddings, load_articles, load_history
-import numpy as np
+from utils import load_behaviors, load_embeddings, load_articles, load_history, to_labeled_format
 import polars as pl
-import polars_distance as pld
 
 """
 Matrices:
@@ -10,47 +8,6 @@ Matrices:
 
 TODO: Take into account both the history and training dataset
 """
-
-
-def extract_features(test: pl.DataFrame):
-    pass
-
-
-def predict(similarities: pl.DataFrame, 
-            behaviors: pl.DataFrame) -> pl.DataFrame:
-    labeled = (binary_labels(behaviors=behaviors)
-               .select("impression_id", "user_id", pl.col("article_ids_inview").alias("article_id"), "clicked_labels"))
-    
-    prediction = (labeled
-     .explode("article_id", "clicked_labels")
-     .join(similarities, on=("user_id", "article_id"), how="left")
-     .group_by("impression_id", maintain_order=True)
-     .agg("clicked_labels", pl.col("similarity").alias("predicted_score")))
-    
-    return prediction
-
-
-def binary_labels(behaviors: pl.DataFrame) -> pl.DataFrame:
-    """
-    Based on create_binary_labels_column from 
-    https://github.com/ebanalyse/ebnerd-benchmark/blob/main/src/ebrec/utils/_behaviors.py
-    """
-
-    behaviors = behaviors.with_row_index()
-
-    labels = (
-        behaviors.explode("article_ids_inview")
-        .with_columns(pl.col("article_ids_inview")
-                      .is_in(pl.col("article_ids_clicked"))
-                      .cast(pl.Int8)
-                      .alias("clicked_labels"))
-        .group_by("index")
-        .agg("clicked_labels")
-    )
-
-    return (behaviors
-            .join(labels, on="index", how="left")
-            .drop("index"))
 
 
 def calculate_user_article_similarity(behaviors: pl.DataFrame, 
@@ -189,7 +146,7 @@ if __name__ == "__main__":
                                                                 article_embeddings=article_embeddings)
     print(user_article_similarity)
 
-    prediction = predict(user_article_similarity, behaviors=behaviors)
+    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("").alias("score")), behaviors=behaviors)
     print(prediction)
 
     prediction.write_parquet("predictions/content_based.parquet")

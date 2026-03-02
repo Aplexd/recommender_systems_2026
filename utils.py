@@ -40,3 +40,46 @@ def load_behaviors() -> pl.DataFrame:
 
 def load_history() -> pl.DataFrame:
     return _load_parquet("HISTORY")
+
+
+def binary_labels(behaviors: pl.DataFrame) -> pl.DataFrame:
+    """
+    Based on create_binary_labels_column from 
+    https://github.com/ebanalyse/ebnerd-benchmark/blob/main/src/ebrec/utils/_behaviors.py
+    """
+
+    behaviors = behaviors.with_row_index()
+
+    labels = (
+        behaviors.explode("article_ids_inview")
+        .with_columns(pl.col("article_ids_inview")
+                      .is_in(pl.col("article_ids_clicked"))
+                      .cast(pl.Int8)
+                      .alias("clicked_labels"))
+        .group_by("index")
+        .agg("clicked_labels")
+    )
+
+    return (behaviors
+            .join(labels, on="index", how="left")
+            .drop("index"))
+
+
+def to_labeled_format(similarities: pl.DataFrame, 
+            behaviors: pl.DataFrame) -> pl.DataFrame:
+    """
+    Transform the format (user_id, article_id, score) to labeled vector format
+    (impression_id, label_vector, prediction_score_vector)
+    """
+    
+    
+    labeled = (binary_labels(behaviors=behaviors)
+               .select("impression_id", "user_id", pl.col("article_ids_inview").alias("article_id"), "clicked_labels"))
+    
+    prediction = (labeled
+     .explode("article_id", "clicked_labels")
+     .join(similarities, on=("user_id", "article_id"), how="left")
+     .group_by("impression_id", maintain_order=True)
+     .agg("clicked_labels", pl.col("score").alias("predicted_score")))
+    
+    return prediction
