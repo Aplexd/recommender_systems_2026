@@ -1,14 +1,6 @@
 from utils import load_behaviors, load_embeddings, load_articles, load_history, to_labeled_format
 import polars as pl
 
-"""
-Matrices:
-- Features per article
-- Features per user 
-
-TODO: Take into account both the history and training dataset
-"""
-
 
 def calculate_user_article_similarity(behaviors: pl.DataFrame, 
             user_features: pl.DataFrame,
@@ -16,17 +8,15 @@ def calculate_user_article_similarity(behaviors: pl.DataFrame,
     """
     Calculates user-article similarity for every article each user has seen
     
-    Result tuples: (impression_id, user_id, article_id, similarity)
+    Result tuples: (user_id, article_id, similarity)
     """
 
     articles_seen_by_user = (
         behaviors
         .select("user_id", pl.col("article_ids_inview").alias("article_id"))
-        # .with_columns(article_inview_index=pl.int_ranges(0, pl.col("article_id").list.len()))
         .explode("article_id")
-        # .with_columns(articles_clicked=pl.col("article_ids_clicked").list.contains(pl.col("article_id")))
 
-        # # User might have been shown the same article multiple times.
+        # User might have been shown the same article multiple times.
         .unique()
     )
 
@@ -51,31 +41,12 @@ def calculate_user_article_similarity(behaviors: pl.DataFrame,
         .explode("article_embedding", "user_embedding")
         .group_by("user_id", "article_id")
         .agg(
-            # similarity=cosine_similarity(pl.col("article_embedding"), pl.col("user_embedding"))
             similarity=(pl.col("article_embedding") * pl.col("user_embedding")).sum() / (pl.col("user_norm") * pl.col("article_norm")).first()
             )
                 
     )
 
     return user_article_similarities
-
-def function(articles: pl.DataFrame,
-             embeddings: pl.DataFrame):
-    embeddings.columns = [embeddings.columns[0], "embedding"]
-    articles.join(embeddings, on="article_id", how="left").select(
-        ["article_id", "embedding"])
-    return
-
-
-def unpack_embeddings(embeddings: pl.DataFrame):
-
-    # Assumes all embedding vectors are same size
-    embedding_size = len(embeddings.item(0, 1))
-
-    return embeddings.select(
-        pl.col("article_id"),
-        *(pl.col("embedding").list.get(i).alias(f"embedding_{i}") for i in range(embedding_size))
-    )
 
 
 def aggregate_user_features(article_features: pl.DataFrame,
@@ -108,12 +79,17 @@ def aggregate_user_features(article_features: pl.DataFrame,
         .with_columns(embedding_norm=pl.col("embedding").list.eval(pl.element().pow(2)).list.sum().sqrt())
     )
 
-# def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-#     dot_product = np.dot(a, b)
+def predict(history: pl.DataFrame,
+            behaviors: pl.DataFrame,
+            article_embeddings: pl.DataFrame) -> pl.DataFrame:
+    user_features = aggregate_user_features(article_embeddings, history)
+    user_article_similarity = calculate_user_article_similarity(behaviors=behaviors, 
+                                                                user_features=user_features, 
+                                                                article_embeddings=article_embeddings)
+    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("similarity").alias("score")), behaviors=behaviors)
 
-#     denominator = np.linalg.norm(a) * np.linalg.norm(b)
+    return prediction
 
-#     return 0 if denominator == 0 else (dot_product / denominator)
 
 # TODO: Abstract this in a way that works
 def norm(column: pl.Expr) -> pl.Expr: 
@@ -126,7 +102,6 @@ def cosine_similarity(a: pl.Expr, b: pl.Expr) -> pl.Expr:
 if __name__ == "__main__":
     print("Starting content based filtering test")
     behaviors = load_behaviors()
-    articles = load_articles()
 
     history = load_history()
 
@@ -146,7 +121,7 @@ if __name__ == "__main__":
                                                                 article_embeddings=article_embeddings)
     print(user_article_similarity)
 
-    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("").alias("score")), behaviors=behaviors)
+    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("similarity").alias("score")), behaviors=behaviors)
     print(prediction)
 
-    prediction.write_parquet("predictions/content_based.parquet")
+    prediction.write_parquet("predictions/content_based.parquet", mkdir=True)

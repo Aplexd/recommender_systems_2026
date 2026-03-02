@@ -72,7 +72,6 @@ def to_labeled_format(similarities: pl.DataFrame,
     (impression_id, label_vector, prediction_score_vector)
     """
     
-    
     labeled = (binary_labels(behaviors=behaviors)
                .select("impression_id", "user_id", pl.col("article_ids_inview").alias("article_id"), "clicked_labels"))
     
