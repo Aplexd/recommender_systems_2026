@@ -1,6 +1,7 @@
 import polars as pl
 import numpy as np
 
+
 # PARAMETERS 
 m = 200 # CTR parameter
 w_ctr = 0.3     # weight for ctr
@@ -39,9 +40,9 @@ ctr_smooth = ctr.with_columns(((pl.col("clicks_count") + m * ctr_global)/ (pl.co
 ctr_smooth = ctr_smooth.fill_nan(0)
 ctr_smooth = ctr_smooth.with_columns(
     pl.when(pl.col("clicks_count") < min_clicks)
-      .then(pl.col("CTR") * 0.5)  # appliquer la réduction
-      .otherwise(pl.col("CTR"))   # sinon garder la valeur originale
-      .alias("CTR")               # on écrase la colonne
+      .then(pl.col("CTR") * 0.5)  # apply the penalisation
+      .otherwise(pl.col("CTR"))   # keep the same value
+      .alias("CTR")
 )
 
 
