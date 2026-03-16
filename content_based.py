@@ -82,6 +82,9 @@ def aggregate_user_features(article_features: pl.DataFrame,
 def predict(history: pl.DataFrame,
             behaviors: pl.DataFrame,
             article_embeddings: pl.DataFrame) -> pl.DataFrame:
+    """
+    Returns the content_based predictions in labeled format.
+    """
     user_features = aggregate_user_features(article_embeddings, history)
     user_article_similarity = calculate_user_article_similarity(behaviors=behaviors, 
                                                                 user_features=user_features, 
@@ -124,4 +127,4 @@ if __name__ == "__main__":
     prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("similarity").alias("score")), behaviors=behaviors)
     print(prediction)
 
-    prediction.write_parquet("predictions/content_based.parquet", mkdir=True)
+    prediction.write_parquet("predictions/content_based.parquet")
