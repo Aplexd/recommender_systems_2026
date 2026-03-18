@@ -1,2 +1,5 @@
 python-dotenv
 polars
+numpy
+scipy
+implicit
