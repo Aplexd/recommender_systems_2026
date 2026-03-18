@@ -98,8 +98,8 @@ def build_similarities_for_inviews(
     user_idx = mapped.get_column("user_idx").to_numpy()
     item_idx = mapped.get_column("item_idx").to_numpy()
 
-    U = model.user_factors  # (n_users, factors)
-    V = model.item_factors  # (n_items, factors)
+    U = model.user_factors
+    V = model.item_factors
 
     scores = np.empty(mapped.height, dtype=np.float32)
     n = mapped.height
@@ -116,43 +116,61 @@ def build_similarities_for_inviews(
     )
 
 
-if __name__ == "__main__":
-    behaviors = load_behaviors()
+def predict(
+    behaviors: pl.DataFrame,
+    factors: int = 50,
+    reg: float = 0.01,
+    iterations: int = 20,
+    batch_rows: int = 1_000_000,
+) -> pl.DataFrame:
+    """
+    Returns the collaborative filtering predictions in labeled format.
+    """
 
-    model, user_item_csr, user_codes, item_codes = collaborative_from_behaviors(
-        behaviors, factors=50, reg=0.01, iterations=20
+    model, _, user_codes, item_codes = collaborative_from_behaviors(
+        behaviors_df=behaviors,
+        factors=factors,
+        reg=reg,
+        iterations=iterations,
     )
-
-    print("user_item_csr shape:", user_item_csr.shape)
-    print("n_users:", user_codes.height, "n_items:", item_codes.height)
-    print("schemas:")
-    print("item_codes:", item_codes.schema)
-    print("behaviors inview:", behaviors.select(["user_id", "article_ids_inview"]).schema)
 
     similarities = build_similarities_for_inviews(
         model=model,
         user_codes=user_codes,
         item_codes=item_codes,
         behaviors=behaviors,
-        batch_rows=1_000_000,
+        batch_rows=batch_rows,
     )
 
-    print("similarities head:")
-    print(similarities.head(20))
+    prediction = to_labeled_format(similarities, behaviors)
 
-    ready_df = to_labeled_format(similarities, behaviors)
-
-    ready_df = ready_df.with_columns(
+    prediction = prediction.with_columns(
         pl.col("predicted_score")
         .list.eval(pl.element().fill_null(0.0))
         .alias("predicted_score")
     )
 
-    print("ready_df head:")
-    print(ready_df.head(20))
+    return prediction
 
-    imp = int(ready_df["impression_id"][0])
-    row = ready_df.filter(pl.col("impression_id") == imp).row(0)
+
+if __name__ == "__main__":
+    behaviors = load_behaviors()
+
+    prediction = predict(
+        behaviors=behaviors,
+        factors=50,
+        reg=0.01,
+        iterations=20,
+        batch_rows=1_000_000,
+    )
+
+    print("prediction head:")
+    print(prediction.head(20))
+
+    imp = int(prediction["impression_id"][0])
+    row = prediction.filter(pl.col("impression_id") == imp).row(0)
     print("\nExample impression:", imp)
     print("clicked_labels:", row[1])
     print("predicted_score:", row[2])
+
+    prediction.write_parquet("predictions/collaborative.parquet")
