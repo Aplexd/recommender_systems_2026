@@ -41,6 +41,12 @@ def load_behaviors() -> pl.DataFrame:
 def load_history() -> pl.DataFrame:
     return _load_parquet("HISTORY")
 
+def load_validation_behaviors() -> pl.DataFrame:
+    return _load_parquet("VALIDATION_BEHAVIORS")
+
+def load_validation_history() -> pl.DataFrame:
+    return _load_parquet("VALIDATION_HISTORY")
+
 
 def binary_labels(behaviors: pl.DataFrame) -> pl.DataFrame:
     """
