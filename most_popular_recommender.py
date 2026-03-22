@@ -1,35 +1,34 @@
 import polars as pl
 import numpy as np
+from utils import to_labeled_format
 
 
 # PARAMETERS 
 m = 200 # CTR parameter
-w_ctr = 0.3     # weight for ctr
-w_click = 0.3 # weight for number of clicks
-w_time = 0.4    # weight for read_time
-w_scroll = 0.2  # weight for scroll time
+w_ctr = 0.6     # weight for ctr
+w_click = 0.4 # weight for number of clicks
+w_time = 0.0    # weight for read_time
+w_scroll = 0.0  # weight for scroll time
 penalty_factor = 0.5  # reduce the score of the articles with low clicks
-quantile_min_clicks = 0.30
+quantile_min_clicks = 0.10
 
 df = pl.read_parquet("datasets/ebnerd_small/train/behaviors.parquet")
+df_val = pl.read_parquet("datasets/ebnerd_small/validation/behaviors.parquet")
 
 # impressions
 impressions = df.explode("article_ids_inview")
-impressions_count = impressions["article_ids_inview"].value_counts(name="impression_count")
-impressions_count =impressions_count.rename({"article_ids_inview": "article_ids"})
-# print(impressions_count)
+impressions_count = impressions["article_ids_inview"].value_counts().rename({"count": "impression_count", "article_ids_inview": "article_ids"})
 
 # clicks
 clicks = df.explode("article_ids_clicked")
-clicks_count = clicks["article_ids_clicked"].value_counts(name="clicks_count")
-clicks_count = clicks_count.rename({"article_ids_clicked": "article_ids"})
+clicks_count = clicks["article_ids_clicked"].value_counts().rename({"count": "clicks_count", "article_ids_clicked": "article_ids"})
 min_clicks = int(clicks_count['clicks_count'].quantile(0.05))
 
 # CTR
 ctr = impressions_count.join(clicks_count, on="article_ids")
 ctr_global = ctr.sum()["clicks_count"].item() /ctr.sum()["impression_count"].item()
 min_clicks = int(ctr['clicks_count'].quantile(quantile_min_clicks))
-print(min_clicks)
+# print(min_clicks)
 
 # ctr = ctr.with_columns((pl.col("clicks_count") / pl.col("impression_count")).alias("CTR"))
 # ctr = ctr.fill_nan(0)
@@ -95,4 +94,25 @@ def softmax_sample(n: int = 10) -> pl.DataFrame:
     indices = np.random.choice(len(ranked), size=n, replace=False, p=softmax_probs)
     return ranked[indices.tolist()]
 
-print(softmax_sample(10))
+print(softmax_sample(5))
+
+# Save predictions in labeled format
+similarities = (
+    df_val.explode("article_ids_inview")
+    .select("user_id", "article_ids_inview")
+    .unique()
+    .join(
+        ranked.select("article_ids", "popularity_score"),
+        left_on="article_ids_inview",
+        right_on="article_ids",
+        how="left"
+    )
+    .select(
+        pl.col("user_id"),
+        pl.col("article_ids_inview").alias("article_id"),
+        pl.col("popularity_score").fill_null(0.0).alias("score")
+    )
+)
+
+prediction = to_labeled_format(similarities, behaviors=df_val)
+prediction.write_parquet("predictions/most_popular.parquet")
