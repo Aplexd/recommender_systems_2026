@@ -1,3 +1,5 @@
+import json
+
 import polars as pl
 from ebrec.evaluation import AucScore, MetricEvaluator, MrrScore, NdcgScore
 
@@ -81,16 +83,41 @@ def evaluate(labeled_dataframe: pl.DataFrame,
 
     return accuracy_metrics
 
-
-if __name__ == "__main__":
+def predict_all():
     articles = load_articles()
     history = load_history()
     article_embeddings = load_embeddings()
     behaviors = load_behaviors()
 
-    content_based_results = pl.read_parquet(
-        "./predictions/content_based.parquet")
+    methods = {"content_based": lambda history, behaviors, articles, article_embeddings: pl.read_parquet("./predictions/content_based.parquet"),
+               }
 
-    evaluation = evaluate(content_based_results,
-                          articles=articles, behaviors=behaviors)
-    print(evaluation)
+    evaluations = {}
+
+    print("Starting prediction")
+
+    for name, prediction_method in methods.items():
+        print(f"Starting predicting for {name}")
+        results = prediction_method(history=history, 
+                          behaviors=behaviors, 
+                          articles=articles, 
+                          article_embeddings=article_embeddings)
+
+        results.write_parquet(f"predictions/{name}.parquet")
+
+        print(f"Done predicting. Start evaluation.")
+
+        evaluation = evaluate(labeled_dataframe=results,
+                          articles=articles, 
+                          behaviors=behaviors)
+        
+        print("Done evaluating")
+
+        evaluations[name] = evaluation
+
+    with open("evaluation_results.json", "w") as file:
+        json.dump(evaluations, file)
+
+
+if __name__ == "__main__":
+    predict_all()
