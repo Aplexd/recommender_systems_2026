@@ -2,4 +2,5 @@ datasets/
 predictions/
 .env
 .venv/
+.venv12/
 __pycache__/

@@ -1,5 +1,9 @@
 from utils import load_behaviors, load_embeddings, load_articles, load_history, to_labeled_format
 import polars as pl
+import sys
+
+EMBEDDING_LENGTH = 768
+EPSILON = sys.float_info.epsilon
 
 
 def calculate_user_article_similarity(behaviors: pl.DataFrame, 
@@ -28,8 +32,13 @@ def calculate_user_article_similarity(behaviors: pl.DataFrame,
                 .select("user_id",
                         pl.col("embedding").alias("user_embedding"),
                         pl.col("embedding_norm").alias("user_norm")),
-                on="user_id")
-        
+                on="user_id",
+                how="left")
+        # Handles new users as origo points
+        .select("user_id", "article_id", 
+                pl.col("user_embedding").fill_null([0,] * EMBEDDING_LENGTH),
+                pl.col("user_norm").fill_null(EPSILON))
+
         # Join with article features
         .join(article_embeddings
                 .select("article_id",
@@ -80,6 +89,7 @@ def aggregate_user_features(article_features: pl.DataFrame,
     )
 
 def predict(history: pl.DataFrame,
+            articles: pl.DataFrame, # Not in use
             behaviors: pl.DataFrame,
             article_embeddings: pl.DataFrame) -> pl.DataFrame:
     """
