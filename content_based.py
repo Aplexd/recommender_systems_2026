@@ -91,15 +91,16 @@ def aggregate_user_features(article_features: pl.DataFrame,
 def predict(history: pl.DataFrame,
             articles: pl.DataFrame, # Not in use
             behaviors: pl.DataFrame,
+            test_behaviors: pl.DataFrame,
             article_embeddings: pl.DataFrame) -> pl.DataFrame:
     """
     Returns the content_based predictions in labeled format.
     """
     user_features = aggregate_user_features(article_embeddings, history)
-    user_article_similarity = calculate_user_article_similarity(behaviors=behaviors, 
+    user_article_similarity = calculate_user_article_similarity(behaviors=test_behaviors, 
                                                                 user_features=user_features, 
                                                                 article_embeddings=article_embeddings)
-    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("similarity").alias("score")), behaviors=behaviors)
+    prediction = to_labeled_format(user_article_similarity.select("user_id", "article_id", pl.col("similarity").alias("score")), behaviors=test_behaviors)
 
     return prediction
 

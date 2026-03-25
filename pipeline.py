@@ -5,7 +5,7 @@ from ebrec.evaluation import AucScore, MetricEvaluator, MrrScore, NdcgScore
 
 from content_based import predict as predict_content_based
 from hybrid_average import read_directory_and_predict as predict_hybrid_average
-from utils import load_articles, load_behaviors, load_embeddings, load_history
+from utils import load_articles, load_behaviors, load_embeddings, load_history, load_test_behaviors
 
 
 def category_coverage(
@@ -94,15 +94,18 @@ def predict_all():
     history = load_history()
     article_embeddings = load_embeddings()
     behaviors = load_behaviors()
+    test_behaviors = load_test_behaviors()
 
     methods = {
         # content_based only works in python 3.12, while ebnerd requeires 3.11, 
         # so it has to be written to be run seperately in python3.12 before running the evaluation
-        "content_based": lambda history, behaviors, articles, article_embeddings: pl.read_parquet(
+        "content_based": lambda history, behaviors, articles, article_embeddings, test_behaviors: pl.read_parquet(
             "./predictions/content_based.parquet"
         ),
+
+        ""
         # Average should be last because it relies on the other prediction files
-        "average": lambda history, behaviors, articles, article_embeddings: predict_hybrid_average(),
+        "average": lambda history, behaviors, articles, article_embeddings, test_behaviors: predict_hybrid_average(),
     }
 
     evaluations = {}
@@ -116,6 +119,7 @@ def predict_all():
             behaviors=behaviors,
             articles=articles,
             article_embeddings=article_embeddings,
+            test_behaviors=test_behaviors
         )
 
         results.write_parquet(f"predictions/{name}.parquet")

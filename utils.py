@@ -38,6 +38,9 @@ def load_embeddings() -> pl.DataFrame:
 def load_behaviors() -> pl.DataFrame:
     return _load_parquet("BEHAVIORS")
 
+def load_test_behaviors() -> pl.DataFrame:
+    return _load_parquet("TEST_BEHAVIORS")
+
 def load_history() -> pl.DataFrame:
     return _load_parquet("HISTORY")
 
