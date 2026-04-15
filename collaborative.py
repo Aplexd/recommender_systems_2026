@@ -1,9 +1,21 @@
+from pathlib import Path
+
 import polars as pl
 import numpy as np
 from scipy.sparse import csr_matrix
 
-from utils import load_behaviors, to_labeled_format
+from prediction_io import (
+    DEFAULT_BATCH_SIZE,
+    ParquetBatchWriter,
+    ProgressTracker,
+    iter_parquet_batches,
+    parquet_row_count,
+)
+from utils import get_dataset_path, to_labeled_format
 from implicit.als import AlternatingLeastSquares
+
+TRAIN_COLUMNS = ["user_id", "article_ids_clicked"]
+TARGET_COLUMNS = ["impression_id", "user_id", "article_ids_inview", "article_ids_clicked"]
 
 
 def collaborative_from_behaviors(
@@ -12,14 +24,12 @@ def collaborative_from_behaviors(
     reg: float,
     iterations: int,
 ):
-
     interactions = (
         behaviors_df
         .select("user_id", pl.col("article_ids_clicked").alias("article_id"))
         .explode("article_id")
         .drop_nulls(["user_id", "article_id"])
     )
-
 
     user_codes = (
         interactions
@@ -62,7 +72,7 @@ def collaborative_from_behaviors(
         regularization=reg,
         iterations=iterations,
     )
-    model.fit(user_item_csr)
+    model.fit(user_item_csr, show_progress=True)
 
     return model, user_item_csr, user_codes, item_codes
 
@@ -74,11 +84,11 @@ def build_similarities_for_inviews(
     behaviors: pl.DataFrame,
     batch_rows: int = 1_000_000,
 ) -> pl.DataFrame:
-
     candidates = (
         behaviors
         .select(
-            pl.col("user_id"),
+            "impression_id",
+            "user_id",
             pl.col("article_ids_inview").alias("article_id"),
         )
         .explode("article_id")
@@ -87,32 +97,55 @@ def build_similarities_for_inviews(
 
     mapped = (
         candidates
-        .join(user_codes, on="user_id", how="inner")
-        .join(item_codes, on="article_id", how="inner")
-        .select(["user_id", "article_id", "user_idx", "item_idx"])
+        .join(user_codes, on="user_id", how="left")
+        .join(item_codes, on="article_id", how="left")
+        .select(["impression_id", "user_id", "article_id", "user_idx", "item_idx"])
     )
 
     if mapped.height == 0:
-        return pl.DataFrame({"user_id": [], "article_id": [], "score": []})
+        return pl.DataFrame({"impression_id": [], "article_id": [], "score": []})
 
-    user_idx = mapped.get_column("user_idx").to_numpy()
-    item_idx = mapped.get_column("item_idx").to_numpy()
+    scorable = mapped.filter(
+        pl.col("user_idx").is_not_null() & pl.col("item_idx").is_not_null()
+    )
 
-    U = model.user_factors
-    V = model.item_factors
+    if scorable.height > 0:
+        user_idx = scorable.get_column("user_idx").cast(pl.UInt32).to_numpy()
+        item_idx = scorable.get_column("item_idx").cast(pl.UInt32).to_numpy()
 
-    scores = np.empty(mapped.height, dtype=np.float32)
-    n = mapped.height
-    for start in range(0, n, batch_rows):
-        end = min(start + batch_rows, n)
-        u = user_idx[start:end]
-        i = item_idx[start:end]
-        scores[start:end] = (U[u] * V[i]).sum(axis=1).astype(np.float32)
+        U = model.user_factors
+        V = model.item_factors
+
+        scorable_scores = np.empty(scorable.height, dtype=np.float32)
+        n = scorable.height
+
+        for start in range(0, n, batch_rows):
+            end = min(start + batch_rows, n)
+            u = user_idx[start:end]
+            i = item_idx[start:end]
+            scorable_scores[start:end] = (U[u] * V[i]).sum(axis=1).astype(np.float32)
+
+        scorable = scorable.with_row_index("row_nr").with_columns(
+            pl.Series(name="score", values=scorable_scores)
+        )
+
+        mapped = mapped.with_row_index("row_nr").join(
+            scorable.select("row_nr", "score"),
+            on="row_nr",
+            how="left",
+        )
+    else:
+        mapped = mapped.with_row_index("row_nr")
+
+    mapped = mapped.with_columns(
+        pl.col("score").fill_null(0.0).cast(pl.Float32)
+    )
 
     return (
         mapped
-        .with_columns(pl.Series(name="score", values=scores))
-        .select(["user_id", "article_id", "score"])
+        .select(["impression_id", "article_id", "score"])
+        .group_by("impression_id", "article_id", maintain_order=True)
+        .agg(pl.col("score").first())
     )
 
 
@@ -122,6 +155,7 @@ def predict(
     reg: float = 0.01,
     iterations: int = 20,
     batch_rows: int = 1_000_000,
+    prediction_batch_size: int = DEFAULT_BATCH_SIZE,
 ) -> pl.DataFrame:
     """
     Returns the collaborative filtering predictions in labeled format.
@@ -134,43 +168,97 @@ def predict(
         iterations=iterations,
     )
 
-    similarities = build_similarities_for_inviews(
-        model=model,
-        user_codes=user_codes,
-        item_codes=item_codes,
-        behaviors=behaviors,
-        batch_rows=batch_rows,
+    prediction_batches: list[pl.DataFrame] = []
+    for batch in behaviors.iter_slices(n_rows=prediction_batch_size):
+        similarities = build_similarities_for_inviews(
+            model=model,
+            user_codes=user_codes,
+            item_codes=item_codes,
+            behaviors=batch,
+            batch_rows=batch_rows,
+        )
+
+        prediction_batches.append(
+            to_labeled_format(similarities, batch).with_columns(
+                pl.col("predicted_score")
+                .list.eval(pl.element().fill_null(0.0))
+                .alias("predicted_score")
+            )
+        )
+
+    return pl.concat(prediction_batches, rechunk=False) if prediction_batches else pl.DataFrame()
+
+
+def predict_to_parquet(
+    train_behaviors_path: str | Path | None = None,
+    target_behaviors_path: str | Path | None = None,
+    output_path: str | Path = "predictions/collaborative.parquet",
+    factors: int = 50,
+    reg: float = 0.01,
+    iterations: int = 20,
+    batch_rows: int = 1_000_000,
+    prediction_batch_size: int = DEFAULT_BATCH_SIZE,
+) -> Path:
+    train_behaviors_path = (
+        Path(train_behaviors_path)
+        if train_behaviors_path is not None
+        else get_dataset_path("BEHAVIORS")
+    )
+    target_behaviors_path = (
+        Path(target_behaviors_path)
+        if target_behaviors_path is not None
+        else get_dataset_path("BEHAVIORS")
     )
 
-    prediction = to_labeled_format(similarities, behaviors)
-
-    prediction = prediction.with_columns(
-        pl.col("predicted_score")
-        .list.eval(pl.element().fill_null(0.0))
-        .alias("predicted_score")
+    train_behaviors = pl.read_parquet(train_behaviors_path, columns=TRAIN_COLUMNS)
+    model, _, user_codes, item_codes = collaborative_from_behaviors(
+        behaviors_df=train_behaviors,
+        factors=factors,
+        reg=reg,
+        iterations=iterations,
     )
 
-    return prediction
+    output_path = Path(output_path)
+    total_rows = parquet_row_count(target_behaviors_path)
+    wrote_batch = False
+
+    with ParquetBatchWriter(output_path) as writer, ProgressTracker(
+        f"Writing {output_path.name}",
+        total=total_rows,
+        unit="rows",
+    ) as progress:
+        for batch in iter_parquet_batches(
+            target_behaviors_path,
+            columns=TARGET_COLUMNS,
+            batch_size=prediction_batch_size,
+        ):
+            similarities = build_similarities_for_inviews(
+                model=model,
+                user_codes=user_codes,
+                item_codes=item_codes,
+                behaviors=batch,
+                batch_rows=batch_rows,
+            )
+            prediction_batch = to_labeled_format(similarities, batch).with_columns(
+                pl.col("predicted_score")
+                .list.eval(pl.element().fill_null(0.0))
+                .alias("predicted_score")
+            )
+            writer.write(prediction_batch)
+            progress.advance(prediction_batch.height)
+            wrote_batch = True
+
+    if not wrote_batch:
+        raise ValueError("No target behavior rows were available for collaborative prediction.")
+
+    return output_path
 
 
 if __name__ == "__main__":
-    behaviors = load_behaviors()
-
-    prediction = predict(
-        behaviors=behaviors,
+    prediction_path = predict_to_parquet(
         factors=50,
         reg=0.01,
         iterations=20,
         batch_rows=1_000_000,
     )
-
-    print("prediction head:")
-    print(prediction.head(20))
-
-    imp = int(prediction["impression_id"][0])
-    row = prediction.filter(pl.col("impression_id") == imp).row(0)
-    print("\nExample impression:", imp)
-    print("clicked_labels:", row[1])
-    print("predicted_score:", row[2])
-
-    prediction.write_parquet("predictions/collaborative.parquet")
+    print(f"Wrote predictions to {prediction_path.resolve()}")

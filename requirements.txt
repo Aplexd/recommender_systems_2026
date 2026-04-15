@@ -3,3 +3,4 @@ polars
 numpy
 scipy
 implicit
+matplotlib

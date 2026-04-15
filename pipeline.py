@@ -1,141 +1,51 @@
-import json
+from __future__ import annotations
 
-import polars as pl
-from ebrec.evaluation import AucScore, MetricEvaluator, MrrScore, NdcgScore
+from collections.abc import Callable
+from typing import Any
 
-from content_based import predict as predict_content_based
-from hybrid_average import read_directory_and_predict as predict_hybrid_average
-from utils import load_articles, load_behaviors, load_embeddings, load_history, load_test_behaviors
+from content_based import predict_to_parquet as predict_content_based_to_parquet
+from evaluation import evaluate_saved_predictions
+from most_popular_recommender import predict_to_parquet as predict_most_popular_to_parquet
 
-
-def category_coverage(
-    labeled_dataframe: pl.DataFrame,
-    articles: pl.DataFrame,
-    behaviors: pl.DataFrame,
-    n_highest: int = 1,
-):
-    """
-    Calculates how many different category-subcategory pairs each user sees and the fraction of the total number
-
-    Returns the average over all users
-
-    args:
-    - n_highest: how many of the highest scored articles per impression we should consider recommended
-
-    return:
-        (count, fraction)
-    """
-    categories_per_article = articles.explode("subcategory").select(
-        "article_id", "category", "subcategory"
-    )
-
-    all_categories = categories_per_article.select("category", "subcategory").unique()
-
-    number_of_distinct_categories = len(all_categories)
-
-    result = (
-        labeled_dataframe.join(
-            behaviors.select("impression_id", "user_id", "article_ids_inview"),
-            on="impression_id",
-        )
-        .explode("article_ids_inview", "clicked_labels", "predicted_score")
-        .group_by("user_id", "impression_id")
-        .agg(
-            pl.col("article_ids_inview")
-            .sort_by("predicted_score", descending=True)
-            .head(n_highest)
-        )
-        .select("user_id", pl.col("article_ids_inview").alias("article_id"))
-        .explode("article_id")
-        .join(categories_per_article, on="article_id")
-        .group_by("user_id")
-        .agg(pl.struct("category", "subcategory").unique().len().alias("n_categories"))
-        .select(
-            "n_categories",
-            (pl.col("n_categories") / number_of_distinct_categories).alias("fraction"),
-        )
-        .mean()
-    )
-
-    return result.row(0)
+try:
+    from collaborative import predict_to_parquet as predict_collaborative_to_parquet
+except ImportError:
+    predict_collaborative_to_parquet = None
 
 
-def evaluate(
-    labeled_dataframe: pl.DataFrame, articles: pl.DataFrame, behaviors: pl.DataFrame
-):
-    """
-    Takes a labeled dataframe as input and returns evaluations for
-    the following metrics: AUC, MRR, NDCG@5, NDCG@10, category_coverage
-    TODO: Use intra-list-diversity?
-    """
-    print("Starting evaluation")
+def generate_evaluation_plots() -> list[str]:
+    try:
+        from plot_evaluation_results import generate_plots
+    except SystemExit as exc:
+        print(f"Skipping evaluation plots: {exc}")
+        return []
 
-    metrics = MetricEvaluator(
-        labels=labeled_dataframe["clicked_labels"].to_list(),
-        predictions=labeled_dataframe["predicted_score"].to_list(),
-        metric_functions=[AucScore(), MrrScore(), NdcgScore(k=5), NdcgScore(k=10)],
-    )
-
-    # .evaluate() sier feilaktig at den gir ut en dict, men gir ut self
-    accuracy_metrics = metrics.evaluate().evaluations  # type: ignore
-
-    print("Evaluating category coverage")
-    count, fraction = category_coverage(
-        labeled_dataframe=labeled_dataframe, articles=articles, behaviors=behaviors
-    )
-    accuracy_metrics["category_coverage"] = {"count": count, "fraction": fraction}
-    print("Evaluation done")
-
-    return accuracy_metrics
+    return [str(path) for path in generate_plots()]
 
 
-def predict_all():
-    articles = load_articles()
-    history = load_history()
-    article_embeddings = load_embeddings()
-    behaviors = load_behaviors()
-    test_behaviors = load_test_behaviors()
+def predict_all(include_collaborative: bool = True) -> dict[str, Any]:
+    stages: list[tuple[str, Callable[[], Any]]] = [
+        ("Writing most_popular predictions", predict_most_popular_to_parquet),
+        ("Writing content_based predictions", lambda: predict_content_based_to_parquet(verbose=True)),
+    ]
+    if include_collaborative:
+        if predict_collaborative_to_parquet is None:
+            print("Skipping collaborative because the 'implicit' package is not installed.")
+        else:
+            stages.append(("Writing collaborative predictions", predict_collaborative_to_parquet))
 
-    methods = {
-        # content_based only works in python 3.12, while ebnerd requeires 3.11, 
-        # so it has to be written to be run seperately in python3.12 before running the evaluation
-        "content_based": lambda history, behaviors, articles, article_embeddings, test_behaviors: pl.read_parquet(
-            "./predictions/content_based.parquet"
-        ),
+    stages.append(("Evaluating saved predictions", evaluate_saved_predictions))
+    stages.append(("Creating evaluation plots", generate_evaluation_plots))
 
-        ""
-        # Average should be last because it relies on the other prediction files
-        "average": lambda history, behaviors, articles, article_embeddings, test_behaviors: predict_hybrid_average(),
-    }
+    result: dict[str, Any] | None = None
+    total_stages = len(stages)
+    for index, (label, action) in enumerate(stages, start=1):
+        print(f"[{index}/{total_stages}] {label}")
+        stage_result = action()
+        if label == "Evaluating saved predictions":
+            result = stage_result
 
-    evaluations = {}
-
-    print("Starting prediction")
-
-    for name, prediction_method in methods.items():
-        print(f"Starting predicting for {name}")
-        results = prediction_method(
-            history=history,
-            behaviors=behaviors,
-            articles=articles,
-            article_embeddings=article_embeddings,
-            test_behaviors=test_behaviors
-        )
-
-        results.write_parquet(f"predictions/{name}.parquet")
-
-        print(f"Done predicting. Start evaluation.")
-
-        evaluation = evaluate(
-            labeled_dataframe=results, articles=articles, behaviors=behaviors
-        )
-
-        print("Done evaluating")
-
-        evaluations[name] = evaluation
-
-    with open("evaluation_results.json", "w") as file:
-        json.dump(evaluations, file)
+    return result or {}
 
 
 if __name__ == "__main__":
